@@ -6,10 +6,8 @@ import {
   useMemo,
   useRef,
   useState,
-  useTransition,
 } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { saveInvoice, emailInvoice } from "@/app/actions";
 import { InvoicePreview, type InvoicePreviewData } from "./InvoicePreview";
 import {
@@ -21,6 +19,7 @@ import {
 import type { CustomField, InvoiceInput, LineItemInput } from "@/lib/schema";
 import { downloadInvoicePdf, invoicePdfToBase64 } from "@/lib/pdf";
 import { clearDraft, writeDraft } from "@/lib/draft";
+import { blankInvoice } from "@/lib/blank-invoice";
 
 type Props = {
   initial: InvoiceInput;
@@ -78,7 +77,6 @@ function validateInvoice(inv: InvoiceInput): Validation {
 }
 
 export default function InvoiceEditor({ initial, initialId }: Props) {
-  const router = useRouter();
   const [invoice, setInvoice] = useState<InvoiceInput>(initial);
   const [id, setId] = useState<string | undefined>(initialId);
   const [status, setStatus] = useState<SaveStatusT>({ kind: "idle" });
@@ -86,7 +84,11 @@ export default function InvoiceEditor({ initial, initialId }: Props) {
   const [emailStatus, setEmailStatus] = useState<EmailStatusT>({ kind: "idle" });
   const [tab, setTab] = useState<"edit" | "preview">("edit");
   const [pdfBusy, setPdfBusy] = useState(false);
-  const [, startTransition] = useTransition();
+  const [formVersion, setFormVersion] = useState(0);
+  const [lastSaved, setLastSaved] = useState<{
+    id: string;
+    number: string;
+  } | null>(null);
 
   const pdfRef = useRef<HTMLDivElement>(null);
   const lastSavedRef = useRef<string>(JSON.stringify(initial));
@@ -199,13 +201,17 @@ export default function InvoiceEditor({ initial, initialId }: Props) {
       setShowErrors(true);
       return;
     }
+    const savedNumber = invoice.invoice_number;
     const nextId = await runSave(invoice, id);
     if (nextId && !id) {
-      setId(nextId);
       clearDraft();
-      startTransition(() => {
-        router.replace(`/invoices/${nextId}`);
-      });
+      setLastSaved({ id: nextId, number: savedNumber });
+      setInvoice(blankInvoice());
+      setShowErrors(false);
+      setEmailTo("");
+      setEmailStatus({ kind: "idle" });
+      setFormVersion((v) => v + 1);
+      lastSavedRef.current = JSON.stringify(blankInvoice());
     }
   }
 
@@ -289,7 +295,22 @@ export default function InvoiceEditor({ initial, initialId }: Props) {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <SaveStatus status={status} autosave={!!id} />
+              <SaveStatus
+                status={
+                  !id && lastSaved && status.kind === "saved"
+                    ? { kind: "idle" }
+                    : status
+                }
+                autosave={!!id}
+              />
+              {!id && lastSaved && (
+                <Link
+                  href={`/invoices/${lastSaved.id}`}
+                  className="text-xs text-emerald-700 hover:text-emerald-900 underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700"
+                >
+                  Saved {lastSaved.number} ✓ View
+                </Link>
+              )}
               {!id && (
                 <button
                   type="button"
@@ -494,13 +515,17 @@ export default function InvoiceEditor({ initial, initialId }: Props) {
                           compact
                         >
                           <input
+                            key={`${it.id}-${formVersion}`}
                             id={`u-${it.id}`}
                             type="text"
                             inputMode="decimal"
+                            placeholder="0.00"
                             className={`${inputCls} tabular-nums text-right ${priceInvalid ? "border-amber-500 focus:border-amber-600 focus:ring-amber-500/20" : ""}`}
-                            defaultValue={centsToDollarsInput(
-                              it.unit_price_cents,
-                            )}
+                            defaultValue={
+                              it.unit_price_cents > 0
+                                ? centsToDollarsInput(it.unit_price_cents)
+                                : ""
+                            }
                             onChange={(e) =>
                               patchLine(i, {
                                 unit_price_cents: Math.max(
@@ -549,11 +574,17 @@ export default function InvoiceEditor({ initial, initialId }: Props) {
               <div className="grid sm:grid-cols-2 gap-3">
                 <Field label="Discount (USD)" htmlFor="discount">
                   <input
+                    key={`discount-${formVersion}`}
                     id="discount"
                     type="text"
                     inputMode="decimal"
+                    placeholder="0.00"
                     className={inputCls + " tabular-nums"}
-                    defaultValue={centsToDollarsInput(invoice.discount_cents)}
+                    defaultValue={
+                      invoice.discount_cents > 0
+                        ? centsToDollarsInput(invoice.discount_cents)
+                        : ""
+                    }
                     onChange={(e) =>
                       patch({
                         discount_cents: Math.max(
@@ -578,13 +609,19 @@ export default function InvoiceEditor({ initial, initialId }: Props) {
                 </Field>
                 <Field label="Tax rate (%)" htmlFor="tax">
                   <input
+                    key={`tax-${formVersion}`}
                     id="tax"
                     type="number"
                     min="0"
                     step="0.01"
                     inputMode="decimal"
+                    placeholder="0.00"
                     className={inputCls + " tabular-nums"}
-                    defaultValue={(invoice.tax_rate_bp / 100).toFixed(2)}
+                    defaultValue={
+                      invoice.tax_rate_bp > 0
+                        ? (invoice.tax_rate_bp / 100).toFixed(2)
+                        : ""
+                    }
                     onChange={(e) =>
                       patch({
                         tax_rate_bp: Math.max(
